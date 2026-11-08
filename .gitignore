@@ -1,0 +1,49 @@
+# Go build artifacts and local workspace
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+/go.work
+/go.work.sum
+
+# Coverage, profiling, and test output
+/coverage/
+/coverage*.out
+/coverage*.html
+*.prof
+*.pprof
+*.testlog
+/test-output.txt
+
+# Local benchmark results (see docs/benchmarks.md)
+/before.txt
+/after.txt
+/bench*.txt
+
+# Local database created by the README example
+/data/
+
+# Local configuration and caches
+.env
+.env.*
+!.env.example
+!.env.sample
+/.cache/
+/tmp/
+/temp/
+
+# Editor and operating system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
