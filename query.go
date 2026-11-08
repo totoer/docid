@@ -29,8 +29,11 @@ func Asc(field Field) Sort  { return Sort{field: field} }
 func Desc(field Field) Sort { return Sort{field: field, desc: true} }
 
 // Query is an immutable reusable builder. Fields must include their source alias.
+// A transaction-bound query can execute only inside its Update callback,
+// sequentially with other operations on that transaction.
 type Query struct {
 	db                *DB
+	tx                *Tx
 	collection, alias string
 	joins             []join
 	where             []Expr
@@ -41,6 +44,33 @@ type Query struct {
 
 func (db *DB) From(collection string) Query {
 	return Query{db: db, collection: collection, alias: collection, limit: -1}
+}
+
+type txQueryContext struct {
+	tx    *Tx
+	query context.Context
+}
+
+func (ctx txQueryContext) Err() error {
+	if err := ctx.tx.check(); err != nil {
+		return err
+	}
+	return ctx.query.Err()
+}
+
+func (q Query) operationContext(ctx context.Context) (operationContext, error) {
+	if q.tx != nil {
+		if err := q.tx.check(); err != nil {
+			return nil, err
+		}
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil context", ErrInvalidQuery)
+	}
+	if q.tx != nil {
+		return txQueryContext{tx: q.tx, query: ctx}, nil
+	}
+	return ctx, nil
 }
 func (q Query) As(alias string) Query { q.alias = alias; return q }
 func (q Query) Where(expr Expr) Query {
@@ -76,14 +106,14 @@ func (q Query) Offset(n int) Query {
 
 func validAlias(alias string) bool { return validName(alias) && !strings.Contains(alias, ".") }
 
-func (q Query) validate() error {
+func (q Query) validate(v readView) error {
 	if q.err != nil {
 		return q.err
 	}
 	if !validAlias(q.alias) {
 		return fmt.Errorf("%w: invalid alias %q", ErrInvalidQuery, q.alias)
 	}
-	if _, ok := q.db.collections[q.collection]; !ok {
+	if _, ok := v.collections[q.collection]; !ok {
 		return fmt.Errorf("%w: %s", ErrCollectionNotFound, q.collection)
 	}
 	aliases := map[string]string{q.alias: q.collection}
@@ -94,7 +124,7 @@ func (q Query) validate() error {
 		if _, exists := aliases[j.alias]; exists {
 			return fmt.Errorf("%w: duplicate alias %q", ErrInvalidQuery, j.alias)
 		}
-		if _, exists := q.db.collections[j.collection]; !exists {
+		if _, exists := v.collections[j.collection]; !exists {
 			return fmt.Errorf("%w: %s", ErrCollectionNotFound, j.collection)
 		}
 		aliases[j.alias] = j.collection
@@ -147,7 +177,7 @@ func (row queryRow) resolver(aliases map[string]int) fieldResolver {
 	}
 }
 
-func (db *DB) records(ctx context.Context, collection string, ids []string, restricted bool, mode recordMode) ([]record, error) {
+func (v readView) records(ctx operationContext, collection string, ids []string, restricted bool, mode recordMode) ([]record, error) {
 	records := make([]record, 0)
 	if restricted {
 		records = make([]record, 0, len(ids))
@@ -155,7 +185,7 @@ func (db *DB) records(ctx context.Context, collection string, ids []string, rest
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			item, err := db.getRecord(collection, id, mode)
+			item, err := v.getRecord(collection, id, mode)
 			if err != nil {
 				return nil, err
 			}
@@ -163,7 +193,7 @@ func (db *DB) records(ctx context.Context, collection string, ids []string, rest
 		}
 		return records, nil
 	}
-	err := db.scanRecords(collection, mode, func(item record) error {
+	err := v.scanRecords(collection, mode, func(item record) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -177,7 +207,7 @@ func (db *DB) records(ctx context.Context, collection string, ids []string, rest
 // probe recognizes an equijoin on an indexed field, including an equality
 // within an AND. A non-nil index with false means the probe is missing or
 // non-scalar and no candidates can match. The full ON expression is still checked.
-func (j join) probe(db *DB, resolve fieldResolver) (*index, scalar, bool) {
+func (j join) probe(v readView, resolve fieldResolver) (*index, scalar, bool) {
 	var probe func(Expr) (*index, scalar, bool)
 	probe = func(e Expr) (*index, scalar, bool) {
 		if e.op == "and" {
@@ -196,7 +226,7 @@ func (j join) probe(db *DB, resolve fieldResolver) (*index, scalar, bool) {
 			if alias != j.alias || otherAlias == j.alias {
 				continue
 			}
-			idx := db.fieldIndex(j.collection, path)
+			idx := v.fieldIndex(j.collection, path)
 			if idx == nil {
 				continue
 			}
@@ -218,13 +248,17 @@ func (j join) probe(db *DB, resolve fieldResolver) (*index, scalar, bool) {
 // All executes a query. Results are deterministic: source document IDs, followed
 // by joined IDs, provide the stable order unless OrderBy is specified.
 func (q Query) All(ctx context.Context) ([]Row, error) {
-	result, err := q.execute(ctx, false)
+	opCtx, err := q.operationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result, err := q.execute(opCtx, false)
 	if err != nil {
 		return nil, err
 	}
 	rows := make([]Row, len(result.rows))
 	for i, row := range result.rows {
-		if err := ctx.Err(); err != nil {
+		if err := opCtx.Err(); err != nil {
 			return nil, err
 		}
 		out := make(Row, len(result.aliases))
@@ -240,22 +274,33 @@ func (q Query) All(ctx context.Context) ([]Row, error) {
 	return rows, nil
 }
 
-func (q Query) execute(ctx context.Context, retainRaw bool) (*queryResult, error) {
+// execute owns the records it returns, including raw JSON when requested.
+// Ordinary queries release the database lock before any user decoder runs.
+func (q Query) execute(ctx operationContext, retainRaw bool) (*queryResult, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: nil context", ErrInvalidQuery)
 	}
-	if q.db == nil {
-		return nil, fmt.Errorf("%w: uninitialized query", ErrInvalidQuery)
-	}
-	q.db.mu.RLock()
-	defer q.db.mu.RUnlock()
-	if q.db.closed {
-		return nil, ErrClosed
+	var v readView
+	if q.tx != nil {
+		if err := q.tx.check(); err != nil {
+			return nil, err
+		}
+		v = q.tx.state.view
+	} else {
+		if q.db == nil {
+			return nil, fmt.Errorf("%w: uninitialized query", ErrInvalidQuery)
+		}
+		q.db.mu.RLock()
+		defer q.db.mu.RUnlock()
+		if q.db.closed {
+			return nil, ErrClosed
+		}
+		v = q.db.readView()
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := q.validate(); err != nil {
+	if err := q.validate(v); err != nil {
 		return nil, err
 	}
 	result := &queryResult{aliases: make([]string, 1, len(q.joins)+1)}
@@ -271,7 +316,7 @@ func (q Query) execute(ctx context.Context, retainRaw bool) (*queryResult, error
 	// The builder is immutable, so the executor can read its predicates without
 	// copying the child slice as the public And constructor does.
 	predicate := Expr{op: "and", children: q.where}
-	idx, op, value := predicate.indexedTerm(q.db, q.collection, q.alias)
+	idx, op, value := predicate.indexedTerm(v, q.collection, q.alias)
 	var ids []string
 	if idx != nil {
 		ids = idx.matches(op, value)
@@ -282,7 +327,7 @@ func (q Query) execute(ctx context.Context, retainRaw bool) (*queryResult, error
 		raw:      retainRaw,
 		document: !retainRaw || len(q.where) != 0 || len(q.joins) != 0 || len(q.order) != 0,
 	}
-	source, err := q.db.records(ctx, q.collection, ids, idx != nil, mode)
+	source, err := v.records(ctx, q.collection, ids, idx != nil, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -313,13 +358,13 @@ func (q Query) execute(ctx context.Context, retainRaw bool) (*queryResult, error
 			}
 			resolve := row.resolver(positions)
 			var candidates []record
-			if idx, value, valid := j.probe(q.db, resolve); idx != nil {
+			if idx, value, valid := j.probe(v, resolve); idx != nil {
 				if valid {
-					candidates, err = q.db.records(ctx, j.collection, idx.matches("eq", value), true, mode)
+					candidates, err = v.records(ctx, j.collection, idx.matches("eq", value), true, mode)
 				}
 			} else {
 				if !loaded {
-					all, err = q.db.records(ctx, j.collection, nil, false, mode)
+					all, err = v.records(ctx, j.collection, nil, false, mode)
 					loaded = true
 				}
 				candidates = all
@@ -384,7 +429,7 @@ type sortKey struct {
 
 // Normalize sort values once per row, rather than allocating numeric scalars
 // and walking field paths for every comparison in the sorting algorithm.
-func sortRows(ctx context.Context, rows []queryRow, order []Sort, positions map[string]int) error {
+func sortRows(ctx operationContext, rows []queryRow, order []Sort, positions map[string]int) error {
 	type keyedRow struct {
 		row  queryRow
 		keys []sortKey
@@ -437,20 +482,31 @@ func sortRows(ctx context.Context, rows []queryRow, order []Sort, positions map[
 // fields such as User User `json:"u"`. Use pointer fields for nullable LEFT JOINs.
 // The slice is replaced on success (empty results produce a non-nil empty slice).
 // On error dst is unchanged. JSON decoding follows the same rules as GetInto.
+// Transaction-bound queries run user decoders inside the Update callback;
+// ordinary queries release the database lock before invoking them.
 func (q Query) AllInto(ctx context.Context, dst any) error {
+	if q.tx != nil {
+		if err := q.tx.check(); err != nil {
+			return err
+		}
+	}
 	target, err := decodeDestination(dst, true)
 	if err != nil {
 		return err
 	}
-	result, err := q.execute(ctx, true)
+	opCtx, err := q.operationContext(ctx)
 	if err != nil {
 		return err
 	}
-	raw, err := result.json(ctx, -1)
+	result, err := q.execute(opCtx, true)
 	if err != nil {
 		return err
 	}
-	return decodeInto(ctx, raw, target)
+	raw, err := result.json(opCtx, -1)
+	if err != nil {
+		return err
+	}
+	return decodeInto(opCtx, raw, target)
 }
 
 // SelectInto executes the query and decodes one alias's documents into a pointer
@@ -458,12 +514,23 @@ func (q Query) AllInto(ctx context.Context, dst any) error {
 // as in All; joins may repeat a document. An unmatched LEFT JOIN decodes as nil
 // for pointer elements, or a zero value for struct elements. The slice is replaced
 // on success; on error dst is unchanged. Decoding follows GetInto's JSON rules.
+// Transaction-bound queries run user decoders inside the Update callback;
+// ordinary queries release the database lock before invoking them.
 func (q Query) SelectInto(ctx context.Context, alias string, dst any) error {
+	if q.tx != nil {
+		if err := q.tx.check(); err != nil {
+			return err
+		}
+	}
 	target, err := decodeDestination(dst, true)
 	if err != nil {
 		return err
 	}
-	result, err := q.execute(ctx, true)
+	opCtx, err := q.operationContext(ctx)
+	if err != nil {
+		return err
+	}
+	result, err := q.execute(opCtx, true)
 	if err != nil {
 		return err
 	}
@@ -477,9 +544,9 @@ func (q Query) SelectInto(ctx context.Context, alias string, dst any) error {
 	if position < 0 {
 		return fmt.Errorf("%w: unknown alias %q", ErrInvalidQuery, alias)
 	}
-	raw, err := result.json(ctx, position)
+	raw, err := result.json(opCtx, position)
 	if err != nil {
 		return err
 	}
-	return decodeInto(ctx, raw, target)
+	return decodeInto(opCtx, raw, target)
 }

@@ -23,6 +23,8 @@ var (
 	ErrInvalidQuery       = errors.New("docid: invalid query")
 	ErrInvalidName        = errors.New("docid: invalid name")
 	ErrInvalidDestination = errors.New("docid: invalid decode destination")
+	ErrInvalidTransaction = errors.New("docid: invalid transaction")
+	ErrTxClosed           = errors.New("docid: transaction closed")
 )
 
 // DB is safe for concurrent use. A query observes one consistent database state.
@@ -102,24 +104,8 @@ func (db *DB) Collections() ([]string, error) {
 	return names, nil
 }
 
-func (db *DB) walk(prefix string, visit func(key string, raw []byte) error) error {
-	// Every prefix used here ends in '/', whose successor is '0'.
-	upper := prefix[:len(prefix)-1] + "0"
-	it, err := db.store.NewIter(&pebble.IterOptions{LowerBound: []byte(prefix), UpperBound: []byte(upper)})
-	if err != nil {
-		return err
-	}
-	defer it.Close()
-	for it.First(); it.Valid(); it.Next() {
-		if err := visit(string(it.Key()), it.Value()); err != nil {
-			return err
-		}
-	}
-	return it.Error()
-}
-
 func (db *DB) load() error {
-	if err := db.walk("c/", func(key string, _ []byte) error {
+	if err := db.readView().walk("c/", func(key string, _ []byte) error {
 		name, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(key, "c/"))
 		if err != nil || !validName(string(name)) {
 			return fmt.Errorf("docid: corrupt collection key %q", key)
@@ -129,7 +115,7 @@ func (db *DB) load() error {
 	}); err != nil {
 		return err
 	}
-	if err := db.walk("i/", func(key string, raw []byte) error {
+	if err := db.readView().walk("i/", func(key string, raw []byte) error {
 		parts := strings.Split(key, "/")
 		if len(parts) != 3 {
 			return fmt.Errorf("docid: corrupt index key %q", key)
@@ -158,7 +144,7 @@ func (db *DB) load() error {
 		if len(indexes) == 0 {
 			continue
 		}
-		if err := db.scan(name, func(id string, doc Document) error {
+		if err := db.readView().scan(name, func(id string, doc Document) error {
 			for _, idx := range indexes {
 				if err := idx.check(id, doc); err != nil {
 					return err
@@ -171,77 +157,4 @@ func (db *DB) load() error {
 		}
 	}
 	return nil
-}
-
-func (db *DB) scan(collection string, visit func(string, Document) error) error {
-	return db.scanRecords(collection, recordMode{document: true}, func(item record) error {
-		return visit(item.id, item.doc)
-	})
-}
-
-func (db *DB) scanRecords(collection string, mode recordMode, visit func(record) error) error {
-	prefix := docPrefix(collection)
-	return db.walk(prefix, func(key string, raw []byte) error {
-		id, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(key, prefix))
-		if err != nil {
-			return err
-		}
-		item, err := readRecord(string(id), raw, mode)
-		if err != nil {
-			return err
-		}
-		return visit(item)
-	})
-}
-
-func (db *DB) getRecord(collection, id string, mode recordMode) (record, error) {
-	raw, closer, err := db.store.Get(docKey(collection, id))
-	if errors.Is(err, pebble.ErrNotFound) {
-		return record{}, ErrNotFound
-	}
-	if err != nil {
-		return record{}, err
-	}
-	defer closer.Close()
-	return readRecord(id, raw, mode)
-}
-
-func readRecord(id string, raw []byte, mode recordMode) (record, error) {
-	item := record{id: id}
-	var err error
-	if mode.document {
-		item.doc, err = decodeDocument(raw)
-	} else {
-		err = validateDocument(raw)
-	}
-	if err != nil {
-		return record{}, err
-	}
-	if mode.raw {
-		// Pebble values expire when their iterator advances or closer closes.
-		// Typed results own the bytes they use after releasing the DB lock.
-		item.raw = string(raw)
-	}
-	return item, nil
-}
-
-func (db *DB) get(collection, id string) (Document, error) {
-	return db.readDocument(collection, id, true)
-}
-
-// Writes without indexes only need to check existence, not allocate a document
-// tree. Still validate stored JSON so corruption keeps the same error behavior.
-func (db *DB) readDocument(collection, id string, materialize bool) (Document, error) {
-	raw, closer, err := db.store.Get(docKey(collection, id))
-	if errors.Is(err, pebble.ErrNotFound) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer closer.Close()
-	if !materialize {
-		return nil, validateDocument(raw)
-	}
-	return decodeDocument(raw)
 }

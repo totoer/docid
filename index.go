@@ -127,7 +127,7 @@ func (c *Collection) CreateIndex(def Index) error {
 		return ErrAlreadyExists
 	}
 	idx := newIndex(def)
-	if err := c.db.scan(c.name, func(id string, doc Document) error {
+	if err := c.db.readView().scan(c.name, func(id string, doc Document) error {
 		if err := idx.check(id, doc); err != nil {
 			return err
 		}
@@ -179,10 +179,10 @@ func (c *Collection) Indexes() ([]Index, error) {
 	return defs, nil
 }
 
-func (db *DB) fieldIndex(collection, field string) *index {
+func (v readView) fieldIndex(collection, field string) *index {
 	// Choose deterministically if multiple indexes cover a field.
 	var selected *index
-	for _, idx := range db.collections[collection] {
+	for _, idx := range v.collections[collection] {
 		if idx.def.Field == field && (selected == nil || idx.def.Name < selected.def.Name) {
 			selected = idx
 		}

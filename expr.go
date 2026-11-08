@@ -166,10 +166,10 @@ func (e Expr) evalWith(resolve fieldResolver) bool {
 
 // indexedTerm finds a safe restriction from a conjunction. OR/NOT never narrow
 // the candidate set, and the entire predicate is evaluated after lookup.
-func (e Expr) indexedTerm(db *DB, collection, alias string) (*index, string, scalar) {
+func (e Expr) indexedTerm(v readView, collection, alias string) (*index, string, scalar) {
 	if e.op == "and" {
 		for _, child := range e.children {
-			if idx, op, value := child.indexedTerm(db, collection, alias); idx != nil {
+			if idx, op, value := child.indexedTerm(v, collection, alias); idx != nil {
 				return idx, op, value
 			}
 		}
@@ -177,7 +177,7 @@ func (e Expr) indexedTerm(db *DB, collection, alias string) (*index, string, sca
 	if e.right == "" && (e.op == "eq" || e.op == "gt" || e.op == "gte" || e.op == "lt" || e.op == "lte") {
 		a, path := splitField(e.field)
 		if a == alias {
-			return db.fieldIndex(collection, path), e.op, e.value
+			return v.fieldIndex(collection, path), e.op, e.value
 		}
 	}
 	return nil, "", scalar{}

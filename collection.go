@@ -40,7 +40,7 @@ func (c *Collection) write(id string, value any, replace bool) error {
 		return ErrClosed
 	}
 	indexes := c.db.collections[c.name]
-	old, err := c.db.readDocument(c.name, id, len(indexes) != 0)
+	old, err := c.db.readView().readDocument(c.name, id, len(indexes) != 0)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
@@ -76,7 +76,7 @@ func (c *Collection) Get(id string) (Document, error) {
 	if c.db.closed {
 		return nil, ErrClosed
 	}
-	return c.db.get(c.name, id)
+	return c.db.readView().get(c.name, id)
 }
 
 // GetInto reads a document into a non-nil pointer, typically *MyStruct.
@@ -88,6 +88,7 @@ func (c *Collection) GetInto(id string, dst any) error {
 	if err != nil {
 		return err
 	}
+	// Copy before releasing the value and lock. User decoders can reenter DB.
 	raw, err := func() ([]byte, error) {
 		c.db.mu.RLock()
 		defer c.db.mu.RUnlock()
@@ -118,7 +119,7 @@ func (c *Collection) Delete(id string) error {
 		return ErrClosed
 	}
 	indexes := c.db.collections[c.name]
-	old, err := c.db.readDocument(c.name, id, len(indexes) != 0)
+	old, err := c.db.readView().readDocument(c.name, id, len(indexes) != 0)
 	if err != nil {
 		return err
 	}

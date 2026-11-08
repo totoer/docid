@@ -2,7 +2,6 @@ package docid
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -22,8 +21,9 @@ func decodeDestination(dst any, slice bool) (reflect.Value, error) {
 }
 
 // Decode into a fresh value so neither existing maps nor pointer fields can be
-// modified on failure. Invoke user unmarshallers only after releasing DB locks.
-func decodeInto(ctx context.Context, raw []byte, dst reflect.Value) error {
+// modified on failure. Ordinary reads release DB locks before this call;
+// transactional reads retain their callback's exclusive lock.
+func decodeInto(ctx operationContext, raw []byte, dst reflect.Value) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func decodeInto(ctx context.Context, raw []byte, dst reflect.Value) error {
 // not re-encode Document maps or build an intermediate []Document for projection.
 // The full array is still passed through encoding/json in one call so custom
 // slice unmarshallers and atomic destination replacement keep their semantics.
-func (r *queryResult) json(ctx context.Context, selected int) ([]byte, error) {
+func (r *queryResult) json(ctx operationContext, selected int) ([]byte, error) {
 	type aliasKey struct {
 		position int
 		json     []byte
