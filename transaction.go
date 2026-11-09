@@ -116,7 +116,7 @@ func (tx *Tx) Collection(name string) (*TxCollection, error) {
 		if err := tx.state.batch.Set([]byte("c/"+enc(name)), []byte("{}"), nil); err != nil {
 			return nil, err
 		}
-		tx.state.view.collections[name] = make(map[string]*index)
+		tx.state.view.collections[name] = newCollectionState()
 	}
 	return &TxCollection{tx: tx, name: name}, nil
 }
@@ -199,8 +199,9 @@ func (c *TxCollection) write(id string, value any, replace bool) error {
 		return err
 	}
 	state := c.tx.state
-	indexes := state.view.collections[c.name]
-	old, err := state.view.readDocument(c.name, id, len(indexes) != 0)
+	current := state.view.collections[c.name]
+	indexes := current.indexes
+	old, err := state.view.readDocument(c.name, id, current.hasIndexes())
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
@@ -208,7 +209,7 @@ func (c *TxCollection) write(id string, value any, replace bool) error {
 		return ErrAlreadyExists
 	}
 	var doc Document
-	if len(indexes) != 0 {
+	if current.hasIndexes() {
 		doc, err = decodeDocument(raw)
 		if err != nil {
 			return err
@@ -219,7 +220,15 @@ func (c *TxCollection) write(id string, value any, replace bool) error {
 			return err
 		}
 	}
-	indexes = state.writableIndexes(c.name)
+	changes, err := current.prepareText(state.ctx, id, old, doc)
+	if err != nil {
+		return err
+	}
+	if err := c.tx.check(); err != nil {
+		return err
+	}
+	writable := state.writableCollection(c.name)
+	indexes = writable.indexes
 	if err := state.batch.Set(docKey(c.name, id), raw, nil); err != nil {
 		return err
 	}
@@ -227,17 +236,21 @@ func (c *TxCollection) write(id string, value any, replace bool) error {
 		idx.remove(id, old)
 		idx.add(id, doc)
 	}
+	writable.applyText(changes)
 	return nil
 }
 
-// writableIndexes detaches a collection's indexes once, before any mutation.
+// writableCollection detaches a collection's indexes once, before any mutation.
 // Both the wrapper map and B-trees must be private, even for rollback on panic.
-func (state *txState) writableIndexes(collection string) map[string]*index {
+func (state *txState) writableCollection(collection string) *collectionState {
 	if !state.writable[collection] {
 		indexes := state.view.collections[collection]
-		copies := make(map[string]*index, len(indexes))
-		for name, idx := range indexes {
-			copies[name] = &index{def: idx.def, tree: idx.tree.Clone()}
+		copies := newCollectionState()
+		for name, idx := range indexes.indexes {
+			copies.indexes[name] = &index{def: idx.def, tree: idx.tree.Clone()}
+		}
+		for name, idx := range indexes.textIndexes {
+			copies.textIndexes[name] = idx.clone()
 		}
 		state.view.collections[collection] = copies
 		state.writable[collection] = true
@@ -252,16 +265,25 @@ func (c *TxCollection) Delete(id string) error {
 		return err
 	}
 	state := c.tx.state
-	old, err := state.view.readDocument(c.name, id, len(state.view.collections[c.name]) != 0)
+	old, err := state.view.readDocument(c.name, id, state.view.collections[c.name].hasIndexes())
 	if err != nil {
 		return err
 	}
-	indexes := state.writableIndexes(c.name)
+	changes, err := state.view.collections[c.name].prepareText(state.ctx, id, old, nil)
+	if err != nil {
+		return err
+	}
+	if err := c.tx.check(); err != nil {
+		return err
+	}
+	writable := state.writableCollection(c.name)
+	indexes := writable.indexes
 	if err := state.batch.Delete(docKey(c.name, id), nil); err != nil {
 		return err
 	}
 	for _, idx := range indexes {
 		idx.remove(id, old)
 	}
+	writable.applyText(changes)
 	return nil
 }

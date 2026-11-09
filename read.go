@@ -16,8 +16,21 @@ type readView struct {
 		Get([]byte) ([]byte, io.Closer, error)
 		NewIter(*pebble.IterOptions) (*pebble.Iterator, error)
 	}
-	collections map[string]map[string]*index
+	collections map[string]*collectionState
 }
+
+// One collection snapshot owns both index kinds. Transaction mutations detach
+// the state, its maps and trees together before publishing a new snapshot.
+type collectionState struct {
+	indexes     map[string]*index
+	textIndexes map[string]*textIndex
+}
+
+func newCollectionState() *collectionState {
+	return &collectionState{indexes: make(map[string]*index), textIndexes: make(map[string]*textIndex)}
+}
+
+func (s *collectionState) hasIndexes() bool { return len(s.indexes) != 0 || len(s.textIndexes) != 0 }
 
 // Internal operations only poll cancellation; they do not need Deadline/Done
 // or a goroutine to combine a query's context with its transaction's context.

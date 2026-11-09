@@ -52,3 +52,34 @@ go test -run '^$' -bench '^BenchmarkQueryFilter$' -benchmem -benchtime=1s -count
 ```sh
 go test -run '^$' -bench '^BenchmarkCollectionDurable$' -benchmem -count=5 ./...
 ```
+
+## Текстовый поиск
+
+| Группа | Что измеряется |
+| --- | --- |
+| `BenchmarkTextPostingsBuild`, `BenchmarkTextPostingsReplace` | Построение позиционного дерева на 1000 документах и замена postings |
+| `BenchmarkTextPostings` | Exact, prefix, phrase и NEAR непосредственно по дереву |
+| `BenchmarkTextIndexCreateDrop` | Полный цикл создания и удаления определения на 1000 документах |
+| `BenchmarkTextOpen` | Открытие Pebble и восстановление текстового индекса на 1000 документах с диска |
+| `BenchmarkTextCRUD` | Put, Delete+Insert и транзакционная замена с текстовым индексом |
+| `BenchmarkTextQuery` | Публичный All: текстовый фильтр, комбинированный фильтр, JOIN и пагинация |
+| `BenchmarkTextRetainedMemory` | Приблизительный retained heap одного позиционного индекса; время включает принудительный GC и не оценивает скорость |
+
+Все группы Text используют B.Loop. Подготовка базы и запросов исключена из
+времени поиска. В PostingsBuild включено построение всего индекса. `B/op`
+обозначает выделения за операцию, а не постоянный объём RAM. Для последнего
+есть отдельная метрика `retained-B/index`; она подвержена шуму общего heap и
+требует нескольких повторов. Более длинные документы и широкие префиксы меняют
+затраты; измерения не являются обещанием фиксированной скорости или памяти.
+
+```sh
+go test -run '^$' -bench '^BenchmarkText' -benchmem -benchtime=1x .
+go test -run '^$' -bench '^BenchmarkText(Query|Open|RetainedMemory)$' -benchmem -count=5 .
+```
+
+Локальный smoke-прогон 2026-11-09 (Apple M1 Pro, Go 1.24.3, одна итерация):
+`BenchmarkTextRetainedMemory` показал 1 134 088 retained bytes для 1000 документов
+с 10 000 вхождений, а `BenchmarkTextOpen` — около 44 ms для своего набора из
+1000 документов. Построение дерева в `BenchmarkTextPostingsBuild` выделило
+3 648 336 bytes. Это проверка работоспособности и единиц измерения; одной
+итерации недостаточно для выводов о скорости или стабильном размере heap.

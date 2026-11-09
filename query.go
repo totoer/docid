@@ -303,6 +303,11 @@ func (q Query) execute(ctx operationContext, retainRaw bool) (*queryResult, erro
 	if err := q.validate(v); err != nil {
 		return nil, err
 	}
+	bound, err := q.bindText(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+	q = bound
 	result := &queryResult{aliases: make([]string, 1, len(q.joins)+1)}
 	result.aliases[0] = q.alias
 	positions := map[string]int{q.alias: 0}
@@ -318,8 +323,11 @@ func (q Query) execute(ctx operationContext, retainRaw bool) (*queryResult, erro
 	predicate := Expr{op: "and", children: q.where}
 	idx, op, value := predicate.indexedTerm(v, q.collection, q.alias)
 	var ids []string
+	restricted := idx != nil
 	if idx != nil {
 		ids = idx.matches(op, value)
+	} else {
+		ids, restricted = predicate.textCandidates(q.alias)
 	}
 	// A plain typed scan can decode stored JSON directly into the destination;
 	// document maps are only needed when evaluating expressions or sort keys.
@@ -327,7 +335,7 @@ func (q Query) execute(ctx operationContext, retainRaw bool) (*queryResult, erro
 		raw:      retainRaw,
 		document: !retainRaw || len(q.where) != 0 || len(q.joins) != 0 || len(q.order) != 0,
 	}
-	source, err := v.records(ctx, q.collection, ids, idx != nil, mode)
+	source, err := v.records(ctx, q.collection, ids, restricted, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -336,12 +344,13 @@ func (q Query) execute(ctx operationContext, retainRaw bool) (*queryResult, erro
 	slots := make([]*record, 0, len(source)*len(result.aliases))
 	scratch := make(queryRow, len(result.aliases))
 	resolve := scratch.resolver(positions)
+	resolveID := scratch.idResolver(positions)
 	for i := range source {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		scratch[0] = &source[i]
-		if len(q.joins) != 0 || len(q.where) == 0 || predicate.evalWith(resolve) {
+		if len(q.joins) != 0 || len(q.where) == 0 || predicate.evalResolved(resolve, resolveID) {
 			start := len(slots)
 			slots = append(slots, scratch...)
 			rows = append(rows, queryRow(slots[start:len(slots):len(slots)]))
@@ -357,6 +366,7 @@ func (q Query) execute(ctx operationContext, retainRaw bool) (*queryResult, erro
 				return nil, err
 			}
 			resolve := row.resolver(positions)
+			resolveID := row.idResolver(positions)
 			var candidates []record
 			if idx, value, valid := j.probe(v, resolve); idx != nil {
 				if valid {
@@ -380,7 +390,7 @@ func (q Query) execute(ctx operationContext, retainRaw bool) (*queryResult, erro
 				// Reuse the input as a candidate; copy only matches. No candidate
 				// map or slice is allocated for rejected pairs.
 				row[slot] = &candidates[ci]
-				if j.on.evalWith(resolve) {
+				if j.on.evalResolved(resolve, resolveID) {
 					matched = true
 					next = append(next, append(queryRow(nil), row...))
 				}
@@ -398,7 +408,7 @@ func (q Query) execute(ctx operationContext, retainRaw bool) (*queryResult, erro
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			if predicate.evalWith(row.resolver(positions)) {
+			if predicate.evalResolved(row.resolver(positions), row.idResolver(positions)) {
 				filtered = append(filtered, row)
 			}
 		}

@@ -18,7 +18,7 @@ func BenchmarkDBLoad(b *testing.B) {
 				}
 				b.ReportAllocs()
 				for b.Loop() {
-					db.collections = make(map[string]map[string]*index)
+					db.collections = make(map[string]*collectionState)
 					if err := db.load(); err != nil {
 						b.Fatal(err)
 					}
@@ -28,15 +28,15 @@ func BenchmarkDBLoad(b *testing.B) {
 					b.Fatal("collection was not restored")
 				}
 				if indexed {
-					if len(indexes) != 3 {
+					if len(indexes.indexes) != 3 {
 						b.Fatal("index definitions were not restored")
 					}
-					for _, idx := range indexes {
+					for _, idx := range indexes.indexes {
 						if idx.tree.Len() != n {
 							b.Fatal("index entries were not restored")
 						}
 					}
-				} else if len(indexes) != 0 {
+				} else if len(indexes.indexes) != 0 {
 					b.Fatal("unexpected indexes")
 				}
 			})

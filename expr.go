@@ -12,12 +12,14 @@ func F(path string) Field { return Field(path) }
 
 // Expr is an immutable predicate. Its zero value is invalid.
 type Expr struct {
-	op       string
-	field    Field
-	right    Field
-	value    scalar
-	children []Expr
-	err      error
+	op          string
+	field       Field
+	right       Field
+	value       scalar
+	children    []Expr
+	err         error
+	text        *textMatch
+	textMatches textIDs // Bound only on a private execution copy of the Expr.
 }
 
 func (f Field) comparison(op string, value any) Expr {
@@ -66,6 +68,14 @@ func (e Expr) validate(aliases map[string]string) error {
 		return e.err
 	}
 	switch e.op {
+	case "match":
+		if e.text == nil {
+			return textSyntax("missing MATCH expression")
+		}
+		if _, ok := aliases[e.text.alias]; !ok || !validName(e.text.index) {
+			return textSyntax("unknown alias or invalid text index name")
+		}
+		return nil
 	case "and", "or", "not":
 		for _, child := range e.children {
 			if err := child.validate(aliases); err != nil {
@@ -118,23 +128,39 @@ func (e Expr) eval(row Row) bool {
 type fieldResolver func(Field) (any, bool)
 
 func (e Expr) evalWith(resolve fieldResolver) bool {
+	return e.evalResolved(resolve, nil)
+}
+
+type documentIDResolver func(string) (string, bool)
+
+func (e Expr) evalResolved(resolve fieldResolver, resolveID documentIDResolver) bool {
 	switch e.op {
+	case "match":
+		if resolveID == nil {
+			return false
+		}
+		id, exists := resolveID(e.text.alias)
+		if !exists {
+			return false
+		}
+		_, matched := e.textMatches[id]
+		return matched
 	case "and":
 		for _, child := range e.children {
-			if !child.evalWith(resolve) {
+			if !child.evalResolved(resolve, resolveID) {
 				return false
 			}
 		}
 		return true
 	case "or":
 		for _, child := range e.children {
-			if child.evalWith(resolve) {
+			if child.evalResolved(resolve, resolveID) {
 				return true
 			}
 		}
 		return false
 	case "not":
-		return !e.children[0].evalWith(resolve)
+		return !e.children[0].evalResolved(resolve, resolveID)
 	}
 	value, exists := resolve(e.field)
 	if e.op == "exists" {

@@ -22,7 +22,7 @@ func benchmarkDB(b *testing.B, durable bool) *DB {
 		var store *pebble.DB
 		store, err = pebble.Open("bench", &pebble.Options{FS: vfs.NewMem()})
 		if err == nil {
-			db = &DB{store: store, collections: make(map[string]map[string]*index)}
+			db = &DB{store: store, collections: make(map[string]*collectionState)}
 		}
 	}
 	if err != nil {

@@ -39,8 +39,9 @@ func (c *Collection) write(id string, value any, replace bool) error {
 	if c.db.closed {
 		return ErrClosed
 	}
-	indexes := c.db.collections[c.name]
-	old, err := c.db.readView().readDocument(c.name, id, len(indexes) != 0)
+	state := c.db.collections[c.name]
+	indexes := state.indexes
+	old, err := c.db.readView().readDocument(c.name, id, state.hasIndexes())
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
@@ -48,7 +49,7 @@ func (c *Collection) write(id string, value any, replace bool) error {
 		return ErrAlreadyExists
 	}
 	var doc Document
-	if len(indexes) != 0 {
+	if state.hasIndexes() {
 		doc, err = decodeDocument(raw)
 		if err != nil {
 			return err
@@ -59,6 +60,10 @@ func (c *Collection) write(id string, value any, replace bool) error {
 			return err
 		}
 	}
+	changes, err := state.prepareText(nil, id, old, doc)
+	if err != nil {
+		return err
+	}
 	if err := c.db.store.Set(docKey(c.name, id), raw, pebble.Sync); err != nil {
 		return err
 	}
@@ -66,6 +71,7 @@ func (c *Collection) write(id string, value any, replace bool) error {
 		idx.remove(id, old)
 		idx.add(id, doc)
 	}
+	state.applyText(changes)
 	return nil
 }
 
@@ -118,8 +124,13 @@ func (c *Collection) Delete(id string) error {
 	if c.db.closed {
 		return ErrClosed
 	}
-	indexes := c.db.collections[c.name]
-	old, err := c.db.readView().readDocument(c.name, id, len(indexes) != 0)
+	state := c.db.collections[c.name]
+	indexes := state.indexes
+	old, err := c.db.readView().readDocument(c.name, id, state.hasIndexes())
+	if err != nil {
+		return err
+	}
+	changes, err := state.prepareText(nil, id, old, nil)
 	if err != nil {
 		return err
 	}
@@ -129,6 +140,7 @@ func (c *Collection) Delete(id string) error {
 	for _, idx := range indexes {
 		idx.remove(id, old)
 	}
+	state.applyText(changes)
 	return nil
 }
 

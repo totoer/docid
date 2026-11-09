@@ -31,7 +31,7 @@ var (
 type DB struct {
 	mu          sync.RWMutex
 	store       *pebble.DB
-	collections map[string]map[string]*index
+	collections map[string]*collectionState
 	closed      bool
 }
 
@@ -41,7 +41,7 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db := &DB{store: store, collections: make(map[string]map[string]*index)}
+	db := &DB{store: store, collections: make(map[string]*collectionState)}
 	if err := db.load(); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -84,7 +84,7 @@ func (db *DB) Collection(name string) (*Collection, error) {
 		if err := db.store.Set([]byte("c/"+enc(name)), []byte("{}"), pebble.Sync); err != nil {
 			return nil, err
 		}
-		db.collections[name] = make(map[string]*index)
+		db.collections[name] = newCollectionState()
 	}
 	return &Collection{db: db, name: name}, nil
 }
@@ -110,7 +110,7 @@ func (db *DB) load() error {
 		if err != nil || !validName(string(name)) {
 			return fmt.Errorf("docid: corrupt collection key %q", key)
 		}
-		db.collections[string(name)] = make(map[string]*index)
+		db.collections[string(name)] = newCollectionState()
 		return nil
 	}); err != nil {
 		return err
@@ -135,21 +135,29 @@ func (db *DB) load() error {
 		if !validName(def.Name) || !validPath(def.Field) || enc(def.Name) != parts[2] {
 			return fmt.Errorf("docid: corrupt index definition")
 		}
-		indexes[def.Name] = newIndex(def)
+		indexes.indexes[def.Name] = newIndex(def)
 		return nil
 	}); err != nil {
 		return err
 	}
+	if err := db.loadTextIndexes(); err != nil {
+		return err
+	}
 	for name, indexes := range db.collections {
-		if len(indexes) == 0 {
+		if !indexes.hasIndexes() {
 			continue
 		}
 		if err := db.readView().scan(name, func(id string, doc Document) error {
-			for _, idx := range indexes {
+			for _, idx := range indexes.indexes {
 				if err := idx.check(id, doc); err != nil {
 					return err
 				}
 				idx.add(id, doc)
+			}
+			for _, idx := range indexes.textIndexes {
+				if err := idx.add(id, doc); err != nil {
+					return err
+				}
 			}
 			return nil
 		}); err != nil {

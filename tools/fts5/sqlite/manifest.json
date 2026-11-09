@@ -1,0 +1,7 @@
+{
+  "url": "https://raw.githubusercontent.com/sqlite/sqlite/8a6f89c845763b11023e438e0fa63dc80aeda72d/ext/fts5/fts5_unicode2.c",
+  "revision": "8a6f89c845763b11023e438e0fa63dc80aeda72d",
+  "sha256": "b2defbe5df532c8fa646f8e4d3044f00cd59c1d3ffe715e6ca49ae7657a72308",
+  "unicode": "6.1",
+  "license": "Public domain; original notice retained in source"
+}

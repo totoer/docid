@@ -122,7 +122,7 @@ func (c *Collection) CreateIndex(def Index) error {
 	if !validName(def.Name) || !validPath(def.Field) {
 		return ErrInvalidName
 	}
-	indexes := c.db.collections[c.name]
+	indexes := c.db.collections[c.name].indexes
 	if _, exists := indexes[def.Name]; exists {
 		return ErrAlreadyExists
 	}
@@ -154,13 +154,13 @@ func (c *Collection) DropIndex(name string) error {
 	if c.db.closed {
 		return ErrClosed
 	}
-	if _, ok := c.db.collections[c.name][name]; !ok {
+	if _, ok := c.db.collections[c.name].indexes[name]; !ok {
 		return ErrNotFound
 	}
 	if err := c.db.store.Delete(indexKey(c.name, name), pebble.Sync); err != nil {
 		return err
 	}
-	delete(c.db.collections[c.name], name)
+	delete(c.db.collections[c.name].indexes, name)
 	return nil
 }
 
@@ -171,8 +171,8 @@ func (c *Collection) Indexes() ([]Index, error) {
 	if c.db.closed {
 		return nil, ErrClosed
 	}
-	defs := make([]Index, 0, len(c.db.collections[c.name]))
-	for _, idx := range c.db.collections[c.name] {
+	defs := make([]Index, 0, len(c.db.collections[c.name].indexes))
+	for _, idx := range c.db.collections[c.name].indexes {
 		defs = append(defs, idx.def)
 	}
 	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
@@ -182,7 +182,7 @@ func (c *Collection) Indexes() ([]Index, error) {
 func (v readView) fieldIndex(collection, field string) *index {
 	// Choose deterministically if multiple indexes cover a field.
 	var selected *index
-	for _, idx := range v.collections[collection] {
+	for _, idx := range v.collections[collection].indexes {
 		if idx.def.Field == field && (selected == nil || idx.def.Name < selected.def.Name) {
 			selected = idx
 		}
